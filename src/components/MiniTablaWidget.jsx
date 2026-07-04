@@ -1,3 +1,8 @@
+/**
+ * Small floating status boxes shown in the top-right corner of OTHER tabs
+ * while the tabla or tanpura is playing — current bol/beat or swar/string —
+ * so you always know what's sounding without switching tabs.
+ */
 import React from 'react';
 import { View, Text, StyleSheet } from 'react-native';
 import { useTablaPlayback } from '../audio/TablaPlaybackContext';

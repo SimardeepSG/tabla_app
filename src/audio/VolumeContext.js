@@ -1,3 +1,8 @@
+/**
+ * Shared mixer state: master, tanpura, and tabla volume levels. The audio
+ * engines register themselves here so a slider on any screen can adjust
+ * playback volume everywhere (effective volume = master x per-instrument).
+ */
 import React, { createContext, useContext, useState, useRef } from 'react';
 
 const VolumeContext = createContext(null);

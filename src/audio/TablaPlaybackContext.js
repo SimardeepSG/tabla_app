@@ -1,3 +1,7 @@
+/**
+ * Broadcasts the tabla's live playback state (playing?, current matra,
+ * taal, bpm) so other tabs can render the mini playback widget.
+ */
 import React, { createContext, useContext, useState } from 'react';
 
 const TablaPlaybackContext = createContext(null);

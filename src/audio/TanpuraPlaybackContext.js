@@ -1,3 +1,7 @@
+/**
+ * Broadcasts the tanpura's live playback state (playing?, current string,
+ * string pattern) so other tabs can render the mini playback widget.
+ */
 import React, { createContext, useContext, useState } from 'react';
 
 const TanpuraPlaybackContext = createContext(null);

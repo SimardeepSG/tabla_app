@@ -1,3 +1,9 @@
+/**
+ * Built-in taal definitions. Each taal lists its matras (beats), vibhag
+ * grouping, which vibhags are khali (shown/played empty-handed), and the
+ * theka — the sequence of bols played per matra.
+ */
+
 /** Helper to create a matra from bol strings */
 const m = (...bols) => ({
   bols: bols,

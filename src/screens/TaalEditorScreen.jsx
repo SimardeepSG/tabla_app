@@ -1,3 +1,7 @@
+/**
+ * Taal editor tab: build a taal from the bol palette, set vibhag breaks
+ * and khali markers, save named variations. Custom taals persist in SQLite.
+ */
 import React, { useState, useEffect, useCallback } from 'react';
 import {
   View,

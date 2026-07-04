@@ -1,3 +1,7 @@
+/**
+ * Hand-drawn SVG icons for the bottom tab bar: tanpura, tabla pair,
+ * taal editor (note + pencil), and settings gear.
+ */
 import React from 'react';
 import Svg, { Path, Circle, Ellipse, Line, Rect } from 'react-native-svg';
 
