@@ -22,43 +22,82 @@ const SAPTAK_OFFSET = {
 };
 
 /**
- * Calculate the playback rate to pitch-shift from Sa_madhya to a target note.
- * rate = 2^(semitones/12)
+ * Target pitch of a string in semitones relative to madhya Sa at the
+ * sample root scale. scaleOffset is the semitone distance from the sample
+ * root to the user's selected Sa.
  */
-function pitchRate(note) {
-  const semitones = SEMITONE_MAP[note.swar] + SAPTAK_OFFSET[note.saptak];
-  return Math.pow(2, semitones / 12);
+function targetSemi(note, scaleOffset = 0) {
+  return SEMITONE_MAP[note.swar] + SAPTAK_OFFSET[note.saptak] + scaleOffset;
 }
 
 /**
- * TanpuraEngine handles loading and looping tanpura string sounds.
+ * TanpuraEngine loads and loops tanpura string plucks.
  *
- * Uses expo-audio (the modern replacement for expo-av).
- * For each of the 4 strings, we create an AudioPlayer with adjusted playback rate.
- * Strings are played in sequence with a configurable delay between plucks.
+ * It is given a set of recordings of the same instrument at different
+ * pitches ({ source, semi }). For each of the 4 strings it picks the
+ * recording closest to the target note and pitch-shifts the remainder via
+ * playback rate, so artifacts from large shifts are avoided. Strings are
+ * plucked in sequence with a configurable interval.
  */
 export class TanpuraEngine {
   players = [null, null, null, null];
+  playerSemi = [null, null, null, null]; // semi of the sample loaded in each slot
   isPlaying = false;
   currentStringIndex = 0;
   timerId = null;
   config;
-  baseSample;
+  sampleSet;
+  volume = 1.0;
 
-  constructor(baseSample, config) {
-    this.baseSample = baseSample;
+  constructor(sampleSet, config) {
+    // Accept a single source for backwards compatibility
+    this.sampleSet = Array.isArray(sampleSet)
+      ? sampleSet
+      : [{ source: sampleSet, semi: 0 }];
     this.config = config;
+  }
+
+  nearestSample(target) {
+    let best = this.sampleSet[0];
+    for (const s of this.sampleSet) {
+      if (Math.abs(target - s.semi) < Math.abs(target - best.semi)) best = s;
+    }
+    return best;
   }
 
   async load() {
     await this.unloadSounds();
-
     for (let i = 0; i < 4; i++) {
-      const player = createAudioPlayer(this.baseSample);
-      player.volume = 1.0;
-      player.rate = pitchRate(this.config.pattern[i]);
-      this.players[i] = player;
+      this.setupString(i);
     }
+  }
+
+  setupString(i) {
+    const target = targetSemi(this.config.pattern[i], this.config.scaleOffset);
+    const sample = this.nearestSample(target);
+
+    // playbackRate is capped at 2.0 on mobile; fold anything beyond it
+    // down an octave so the note stays correct, just an octave lower.
+    let rate = Math.pow(2, (target - sample.semi) / 12);
+    while (rate > 2.0) rate /= 2;
+    while (rate < 0.25) rate *= 2;
+
+    if (this.players[i] && this.playerSemi[i] === sample.semi) {
+      // Same recording — just retune
+      this.players[i].shouldCorrectPitch = false;
+      this.players[i].playbackRate = rate;
+      return;
+    }
+
+    if (this.players[i]) {
+      this.players[i].release();
+    }
+    const player = createAudioPlayer(sample.source);
+    player.volume = this.volume;
+    player.shouldCorrectPitch = false;
+    player.playbackRate = rate;
+    this.players[i] = player;
+    this.playerSemi[i] = sample.semi;
   }
 
   async start() {
@@ -82,16 +121,21 @@ export class TanpuraEngine {
   }
 
   async updateConfig(config) {
-    const wasPlaying = this.isPlaying;
-    await this.stop();
     this.config = { ...this.config, ...config };
-    await this.load();
-    if (wasPlaying) {
-      await this.start();
+
+    const pitchChanged =
+      config.pattern !== undefined || config.scaleOffset !== undefined;
+    if (!pitchChanged) return; // speed changes take effect on the next pluck
+
+    if (this.players[0]) {
+      for (let i = 0; i < 4; i++) {
+        this.setupString(i);
+      }
     }
   }
 
   setVolume(vol) {
+    this.volume = vol;
     for (const player of this.players) {
       if (player) {
         player.volume = vol;
@@ -127,6 +171,7 @@ export class TanpuraEngine {
       if (this.players[i]) {
         this.players[i].release();
         this.players[i] = null;
+        this.playerSemi[i] = null;
       }
     }
   }
