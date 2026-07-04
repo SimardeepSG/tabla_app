@@ -6,9 +6,12 @@ A mobile-first Tanpura and Tabla practice companion built for Gurmat Sangeet (Si
 
 ### Tanpura
 - 4-string tanpura drone with configurable swar and saptak per string
-- Scale selector (C through B) with interactive harmonium keyboard visualization
+  (defaults to the traditional Pa · Sa · Sa · Sa-mandra tuning)
+- Scale selector (C through B) with interactive harmonium keyboard —
+  wired to the engine, persisted across launches
 - Speed control for pluck interval
-- Pitch-shifting from a base Sa sample using playback rate adjustment
+- Real pluck recordings at four pitches; the engine picks the nearest
+  recording per string and pitch-shifts only the remainder
 
 ### Tabla
 - 8 built-in taals: Teentaal, Ektaal, Jhaptaal, Rupak, Dadra, Keherwa, Chautaal, and Addha (Gurmat Sangeet)
@@ -84,8 +87,18 @@ src/
   utils/
     ThemeContext.js           # Theme provider with 4 themes
 
+  components/ui/
+    Card.jsx                 # Surface card with section label
+    PlayButton.jsx           # Circular play/stop with breathing glow
+    Slider.jsx               # Shared touch slider (BPM, speed, mixer)
+  audio/
+    bolMap.js                # Bol -> stroke sub-hit mapping + fallbacks
+    tablaSamples.js          # Tabla stroke sample sources
+    tanpuraSamples.js        # Tanpura pluck sample set + root pitch
+
 assets/
-  samples/tanpura/sa.wav     # Base Sa sample for pitch shifting
+  samples/tabla/*.wav        # 11 tabla strokes (CC BY 4.0, see ATTRIBUTIONS.md)
+  samples/tanpura/*.mp3      # Matched 4-string tanpura pluck set (CC0)
 ```
 
 ## Getting Started
@@ -102,9 +115,16 @@ Then open in Expo Go on your device, or press `w` for web.
 
 ## Audio Samples
 
-The app currently ships with a placeholder sine wave for the tanpura Sa. For production quality:
-- Replace `assets/samples/tanpura/sa.wav` with a real tanpura Sa recording
-- Add tabla bol samples (Dha, Dhin, Tin, Na, etc.) and wire them into `TablaEngine`
+The app ships with real, openly-licensed recordings (see [ATTRIBUTIONS.md](ATTRIBUTIONS.md)):
+
+- **Tabla:** 11 individual stroke samples (dha, dhin, tin, ta, na, ge, ke, kat, ti, te, tun)
+  from the CC-BY-4.0 "Tabla strokes dataset" by Subodh Deolekar, tuned to C#.
+  Compound bols (Tete, Tirakita, Kda, Gadi, Dhere) are voiced by scheduling
+  multiple sub-hits inside a matra via `src/audio/bolMap.js`; missing strokes
+  degrade gracefully through a fallback chain.
+- **Tanpura:** a matched CC0 4-string pluck set (Pa G#2, Dha A#2, Sa C#3, Sa C#2)
+  by luckylittleraven. The engine picks the nearest recording per string and
+  pitch-shifts only the remainder, so the default C# tuning plays unshifted.
 
 ## License
 
