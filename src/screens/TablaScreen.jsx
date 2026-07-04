@@ -1,3 +1,8 @@
+/**
+ * Tabla tab: pick a taal (built-in or your own), see its theka laid out by
+ * vibhag, set the tempo (slider, nudge buttons, or tap tempo), and play.
+ * Changing taal mid-play queues the switch for the next sam (partaal).
+ */
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import {
   View,
@@ -5,38 +10,75 @@ import {
   StyleSheet,
   TouchableOpacity,
   ScrollView,
-  useWindowDimensions,
+  Animated,
 } from 'react-native';
+import { useFocusEffect } from 'expo-router';
 import { TablaEngine } from '../audio/TablaEngine';
+import { STROKE_SAMPLES } from '../audio/tablaSamples';
 import { BUILT_IN_TAALS } from '../models/taals';
+import { getCustomTaals } from '../db/database';
 import { useVolume } from '../audio/VolumeContext';
-import { useTheme } from '../utils/ThemeContext';
+import { useTheme, spacing, radius, type } from '../utils/ThemeContext';
 import { useTablaPlayback } from '../audio/TablaPlaybackContext';
+import { Card } from '../components/ui/Card';
+import PlayButton from '../components/ui/PlayButton';
+import Slider from '../components/ui/Slider';
 
-const CONTAINER_PADDING = 20;
-const MATRA_MIN_WIDTH = 50;
-const MATRA_GAP = 6;
+const BPM_MIN = 20;
+const BPM_MAX = 300;
 
 const DEFAULT_CONFIG = {
   taal: BUILT_IN_TAALS[0],
   bpm: 80,
-  speed: 'madhya',
-  pitchOffset: 0,
 };
+
+/**
+ * Traditional vibhag markings: sam is X, khali vibhags are 0,
+ * remaining tali vibhags count 2, 3, ... skipping khalis.
+ */
+function vibhagLabels(taal) {
+  const labels = [];
+  let tali = 2;
+  for (let v = 0; v < taal.vibhag.length; v++) {
+    const isKhali = taal.khaliVibhag.includes(v);
+    if (v === 0 && !isKhali) {
+      labels.push('X');
+    } else if (isKhali) {
+      labels.push('0');
+    } else {
+      labels.push(String(tali++));
+    }
+  }
+  return labels;
+}
+
+/** Split the flat theka into per-vibhag chunks. */
+function vibhagChunks(taal) {
+  const chunks = [];
+  let start = 0;
+  for (const len of taal.vibhag) {
+    chunks.push({ start, matras: taal.theka.slice(start, start + len) });
+    start += len;
+  }
+  return chunks;
+}
 
 export default function TablaScreen() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [config, setConfig] = useState(DEFAULT_CONFIG);
   const [currentMatra, setCurrentMatra] = useState(0);
   const [showTaalPicker, setShowTaalPicker] = useState(false);
+  const [customTaals, setCustomTaals] = useState([]);
+  const [pendingTaal, setPendingTaal] = useState(null);
   const [isTapping, setIsTapping] = useState(false);
   const engineRef = useRef(null);
+  const pendingTaalRef = useRef(null);
   const tapTimesRef = useRef([]);
   const tapTimeoutRef = useRef(null);
+  const beatPulse = useRef(new Animated.Value(1)).current;
 
   const { registerTablaEngine } = useVolume();
   const { colors } = useTheme();
-  const { width: screenWidth } = useWindowDimensions();
   const { updatePlayback } = useTablaPlayback();
 
   // Sync playback state to context so other tabs can show the mini widget
@@ -44,19 +86,40 @@ export default function TablaScreen() {
     updatePlayback({ isPlaying, currentMatra, taal: config.taal, bpm: config.bpm });
   }, [isPlaying, currentMatra, config.taal, config.bpm]);
 
-  // Recalculates on every render / resize
-  const available = screenWidth - CONTAINER_PADDING * 2;
-  const needed = config.taal.matras * MATRA_MIN_WIDTH + (config.taal.matras - 1) * MATRA_GAP;
-  const showTheka = needed <= available;
+  // Pick up custom taals created in the editor whenever this tab gains focus
+  useFocusEffect(
+    useCallback(() => {
+      getCustomTaals()
+        .then(setCustomTaals)
+        .catch(() => {});
+    }, [])
+  );
+
+  // Small pulse on each beat
+  useEffect(() => {
+    if (!isPlaying) return;
+    beatPulse.setValue(1.06);
+    Animated.spring(beatPulse, {
+      toValue: 1,
+      friction: 5,
+      useNativeDriver: true,
+    }).start();
+  }, [currentMatra, isPlaying]);
 
   const initEngine = useCallback(async () => {
     if (engineRef.current) return;
 
-    const bolSamples = {};
-    engineRef.current = new TablaEngine(bolSamples, config);
-
+    engineRef.current = new TablaEngine(STROKE_SAMPLES, config);
     engineRef.current.onMatra = (index) => {
       setCurrentMatra(index);
+    };
+    engineRef.current.onSam = () => {
+      if (pendingTaalRef.current) {
+        const taal = pendingTaalRef.current;
+        pendingTaalRef.current = null;
+        setPendingTaal(null);
+        setConfig((c) => ({ ...c, taal }));
+      }
     };
 
     await engineRef.current.load();
@@ -76,23 +139,23 @@ export default function TablaScreen() {
   }, [isPlaying, initEngine]);
 
   const selectTaal = (taal) => {
-    const newConfig = { ...config, taal };
-    setConfig(newConfig);
     setShowTaalPicker(false);
-    setCurrentMatra(0);
 
-    if (engineRef.current) {
-      if (isPlaying) {
-        engineRef.current.queueTaalChange(taal);
-      } else {
-        engineRef.current.setTaal(taal);
-      }
+    if (engineRef.current && isPlaying) {
+      // Partaal: takes effect on the next sam; the UI follows when it lands
+      engineRef.current.queueTaalChange(taal);
+      pendingTaalRef.current = taal;
+      setPendingTaal(taal);
+    } else {
+      setConfig((c) => ({ ...c, taal }));
+      setCurrentMatra(0);
+      engineRef.current?.setTaal(taal);
     }
   };
 
-  const adjustBpm = (delta) => {
-    const newBpm = Math.max(1, Math.min(400, config.bpm + delta));
-    const newConfig = { ...config, bpm: newBpm };
+  const setBpm = (newBpm) => {
+    const clamped = Math.max(BPM_MIN, Math.min(BPM_MAX, Math.round(newBpm)));
+    const newConfig = { ...config, bpm: clamped };
     setConfig(newConfig);
     engineRef.current?.updateConfig(newConfig);
   };
@@ -109,15 +172,8 @@ export default function TablaScreen() {
 
     if (tapTimesRef.current.length >= 2) {
       const taps = tapTimesRef.current;
-      const totalMs = taps[taps.length - 1] - taps[0];
-      const intervals = taps.length - 1;
-      const avgMs = totalMs / intervals;
-      const tappedBpm = Math.round(60000 / avgMs);
-      const clampedBpm = Math.max(1, Math.min(400, tappedBpm));
-
-      const newConfig = { ...config, bpm: clampedBpm };
-      setConfig(newConfig);
-      engineRef.current?.updateConfig(newConfig);
+      const avgMs = (taps[taps.length - 1] - taps[0]) / (taps.length - 1);
+      setBpm(60000 / avgMs);
     }
 
     tapTimeoutRef.current = setTimeout(() => {
@@ -126,197 +182,180 @@ export default function TablaScreen() {
     }, 2000);
   };
 
-  const setBpmFromSlider = (locationX) => {
-    const w = screenWidth - CONTAINER_PADDING * 2 - 108;
-    const ratio = Math.max(0, Math.min(1, locationX / w));
-    const newBpm = Math.round(1 + ratio * 399);
-    const newConfig = { ...config, bpm: newBpm };
-    setConfig(newConfig);
-    engineRef.current?.updateConfig(newConfig);
-  };
-
-  const getVibhagIndex = (matraIndex) => {
-    let count = 0;
-    for (let v = 0; v < config.taal.vibhag.length; v++) {
-      count += config.taal.vibhag[v];
-      if (matraIndex < count) return v;
-    }
-    return 0;
-  };
-
-  const isVibhagStart = (matraIndex) => {
-    let count = 0;
-    for (const v of config.taal.vibhag) {
-      if (matraIndex === count) return true;
-      count += v;
-    }
-    return false;
-  };
+  const allTaals = [...BUILT_IN_TAALS, ...customTaals];
+  const labels = vibhagLabels(config.taal);
+  const chunks = vibhagChunks(config.taal);
+  const currentBols = config.taal.theka[currentMatra]?.bols.join(' ') || '-';
 
   const styles = getStyles(colors);
 
   return (
-    <ScrollView style={styles.container}>
-      <Text style={styles.title}>Tabla</Text>
-
-      {/* Current taal */}
+    <ScrollView style={styles.container} contentContainerStyle={styles.content}>
+      {/* Taal selector */}
       <TouchableOpacity
+        activeOpacity={0.75}
         style={styles.taalSelector}
         onPress={() => setShowTaalPicker(!showTaalPicker)}
       >
-        <Text style={styles.taalName}>{config.taal.name}</Text>
-        <Text style={styles.taalMeta}>
-          {config.taal.matras} matras
-        </Text>
-        <Text style={styles.taalChangeHint}>
-          {showTaalPicker ? 'Close' : 'Change Taal'}
-        </Text>
+        <View style={{ flex: 1 }}>
+          <Text style={[type.label, { color: colors.textSecondary }]}>Taal</Text>
+          <Text style={styles.taalName}>{config.taal.name}</Text>
+          <Text style={styles.taalMeta}>
+            {config.taal.matras} matras · {config.taal.vibhag.join(' + ')}
+          </Text>
+          {pendingTaal && (
+            <Text style={[styles.pendingText, { color: colors.success }]}>
+              → {pendingTaal.name} on next sam
+            </Text>
+          )}
+        </View>
+        <View style={[styles.chevron, { backgroundColor: colors.accentSoft }]}>
+          <Text style={{ color: colors.accent, fontSize: 16, fontWeight: '700' }}>
+            {showTaalPicker ? '×' : '▾'}
+          </Text>
+        </View>
       </TouchableOpacity>
 
       {/* Taal picker */}
       {showTaalPicker && (
-        <View style={styles.taalList}>
-          {BUILT_IN_TAALS.map((taal) => (
-            <TouchableOpacity
-              key={taal.id}
-              style={[
-                styles.taalOption,
-                config.taal.id === taal.id && styles.taalOptionActive,
-              ]}
-              onPress={() => selectTaal(taal)}
-            >
-              <Text
-                style={[
-                  styles.taalOptionText,
-                  config.taal.id === taal.id && styles.taalOptionTextActive,
-                ]}
-              >
-                {taal.name} ({taal.matras})
-              </Text>
-            </TouchableOpacity>
-          ))}
-        </View>
-      )}
-
-      {/* Theka display -- hidden entirely if it would need to wrap */}
-      {showTheka && (
-        <View style={styles.thekaContainer}>
-          {config.taal.theka.map((matra, i) => {
-            const vibhagIdx = getVibhagIndex(i);
-            const isKhali = config.taal.khaliVibhag.includes(vibhagIdx);
-            const isSam = i === 0;
-            const isActive = i === currentMatra && isPlaying;
-
+        <Card style={{ paddingVertical: spacing.sm }}>
+          {allTaals.map((taal, idx) => {
+            const isActive = config.taal.id === taal.id;
+            const firstCustom = taal.isCustom && !allTaals[idx - 1]?.isCustom;
             return (
-              <View key={i} style={styles.matraWrapper}>
-                {isVibhagStart(i) && (
-                  <Text style={styles.vibhagMarker}>
-                    {isSam ? 'X' : isKhali ? '0' : '|'}
+              <View key={taal.id}>
+                {firstCustom && (
+                  <Text style={[type.label, styles.pickerDivider, { color: colors.textTertiary }]}>
+                    Your taals
                   </Text>
                 )}
-                <View
-                  style={[
-                    styles.matraBox,
-                    isActive && styles.matraBoxActive,
-                    isSam && styles.matraBoxSam,
-                  ]}
+                <TouchableOpacity
+                  style={[styles.taalOption, isActive && { backgroundColor: colors.accentSoft }]}
+                  onPress={() => selectTaal(taal)}
                 >
-                  <Text
-                    style={[
-                      styles.matraText,
-                      isActive && styles.matraTextActive,
-                    ]}
-                  >
-                    {matra.bols.join(' ')}
+                  <Text style={[styles.taalOptionText, isActive && { color: colors.accent, fontWeight: '700' }]}>
+                    {taal.name}
                   </Text>
-                </View>
-                <Text style={styles.matraNumber}>{i + 1}</Text>
+                  <Text style={[styles.taalOptionMeta, { color: colors.textTertiary }]}>
+                    {taal.matras}
+                  </Text>
+                </TouchableOpacity>
               </View>
             );
           })}
-        </View>
+        </Card>
       )}
 
-      {/* Info box: bol, beat, BPM all in one bordered square */}
-      <TouchableOpacity
-        style={styles.infoBox}
-        onPress={handleTapTempo}
-        activeOpacity={0.7}
-      >
-        {isTapping && (
-          <View style={styles.recordingDotRow}>
-            <View style={styles.recordingDot} />
-          </View>
-        )}
-
-        <Text style={styles.infoBol}>
-          {config.taal.theka[currentMatra]?.bols.join(' ') || '-'}
-        </Text>
-        <Text style={styles.infoBeat}>{currentMatra + 1}</Text>
-        <Text style={styles.infoBpm}>{config.bpm} BPM</Text>
-
-        <Text style={styles.tapHint}>
-          {isTapping ? 'Keep tapping...' : 'Tap to set BPM'}
-        </Text>
-      </TouchableOpacity>
-
-      {/* BPM slider with -5 / +5 */}
-      <View style={styles.sliderSection}>
-        <View style={styles.sliderRow}>
-          <TouchableOpacity
-            style={styles.bpmNudge}
-            onPress={() => adjustBpm(-5)}
-          >
-            <Text style={styles.bpmNudgeText}>-5</Text>
-          </TouchableOpacity>
-
-          <View
-            style={styles.sliderTrack}
-            onStartShouldSetResponder={() => true}
-            onMoveShouldSetResponder={() => true}
-            onResponderGrant={(e) =>
-              setBpmFromSlider(e.nativeEvent.locationX)
-            }
-            onResponderMove={(e) =>
-              setBpmFromSlider(e.nativeEvent.locationX)
-            }
-          >
-            <View
-              style={[
-                styles.sliderFill,
-                { width: `${((config.bpm - 1) / 399) * 100}%` },
-              ]}
-            />
-            <View
-              style={[
-                styles.sliderThumb,
-                { left: `${((config.bpm - 1) / 399) * 100}%` },
-              ]}
-            />
-          </View>
-
-          <TouchableOpacity
-            style={styles.bpmNudge}
-            onPress={() => adjustBpm(5)}
-          >
-            <Text style={styles.bpmNudgeText}>+5</Text>
-          </TouchableOpacity>
-        </View>
-        <View style={styles.sliderLabels}>
-          <Text style={styles.sliderLabelText}>1</Text>
-          <Text style={styles.sliderLabelText}>400</Text>
-        </View>
+      {/* Theka, grouped by vibhag; wraps on narrow screens instead of hiding */}
+      <View style={styles.thekaContainer}>
+        {chunks.map((chunk, v) => {
+          const isKhali = config.taal.khaliVibhag.includes(v);
+          return (
+            <View key={v} style={styles.vibhagGroup}>
+              <Text
+                style={[
+                  styles.vibhagMarker,
+                  { color: isKhali ? colors.textTertiary : colors.accent },
+                ]}
+              >
+                {labels[v]}
+              </Text>
+              <View style={styles.vibhagRow}>
+                {chunk.matras.map((matra, j) => {
+                  const i = chunk.start + j;
+                  const isActive = i === currentMatra && isPlaying;
+                  const isSam = i === 0;
+                  return (
+                    <View key={i} style={styles.matraWrapper}>
+                      <View
+                        style={[
+                          styles.matraBox,
+                          { backgroundColor: colors.surface, borderColor: 'transparent' },
+                          isSam && { borderColor: colors.accent },
+                          isActive && { backgroundColor: colors.accent },
+                        ]}
+                      >
+                        <Text
+                          style={[
+                            styles.matraText,
+                            { color: isActive ? colors.onAccent : colors.text },
+                          ]}
+                          numberOfLines={1}
+                        >
+                          {matra.bols.join(' ')}
+                        </Text>
+                      </View>
+                      <Text style={[styles.matraNumber, { color: colors.textTertiary }]}>
+                        {i + 1}
+                      </Text>
+                    </View>
+                  );
+                })}
+              </View>
+            </View>
+          );
+        })}
       </View>
 
-      {/* Play/Stop */}
-      <TouchableOpacity
-        style={[styles.playButton, isPlaying && styles.playButtonActive]}
-        onPress={togglePlayback}
-      >
-        <Text style={styles.playButtonText}>
-          {isPlaying ? 'Stop' : 'Play'}
-        </Text>
+      {/* Beat display; tap to set tempo */}
+      <TouchableOpacity activeOpacity={0.85} onPress={handleTapTempo}>
+        <Animated.View
+          style={[
+            styles.infoBox,
+            {
+              backgroundColor: colors.surfaceElevated,
+              borderColor: isTapping ? colors.accent : colors.border,
+              transform: [{ scale: beatPulse }],
+            },
+          ]}
+        >
+          {isTapping && <View style={[styles.recordingDot, { backgroundColor: colors.danger }]} />}
+          <Text style={[styles.infoBol, { color: colors.accent }]} numberOfLines={1}>
+            {currentBols}
+          </Text>
+          <Text style={[styles.infoBeat, { color: colors.text }]}>
+            beat {currentMatra + 1}
+            <Text style={{ color: colors.textTertiary }}> / {config.taal.matras}</Text>
+          </Text>
+          <Text style={[styles.tapHint, { color: colors.textTertiary }]}>
+            {isTapping ? 'keep tapping…' : 'tap in tempo to set BPM'}
+          </Text>
+        </Animated.View>
       </TouchableOpacity>
+
+      {/* Tempo */}
+      <Card label={`Tempo · ${config.bpm} BPM`}>
+        <View style={styles.bpmRow}>
+          <TouchableOpacity
+            style={[styles.bpmNudge, { backgroundColor: colors.buttonBg }]}
+            onPress={() => setBpm(config.bpm - 5)}
+          >
+            <Text style={[styles.bpmNudgeText, { color: colors.text }]}>−5</Text>
+          </TouchableOpacity>
+          <View style={{ flex: 1 }}>
+            <Slider
+              value={(config.bpm - BPM_MIN) / (BPM_MAX - BPM_MIN)}
+              onValueChange={(r) => setBpm(BPM_MIN + r * (BPM_MAX - BPM_MIN))}
+            />
+          </View>
+          <TouchableOpacity
+            style={[styles.bpmNudge, { backgroundColor: colors.buttonBg }]}
+            onPress={() => setBpm(config.bpm + 5)}
+          >
+            <Text style={[styles.bpmNudgeText, { color: colors.text }]}>+5</Text>
+          </TouchableOpacity>
+        </View>
+        <View style={styles.bpmScaleRow}>
+          <Text style={[styles.bpmScaleText, { color: colors.textTertiary }]}>{BPM_MIN}</Text>
+          <Text style={[styles.bpmScaleText, { color: colors.textTertiary }]}>{BPM_MAX}</Text>
+        </View>
+      </Card>
+
+      <PlayButton
+        isPlaying={isPlaying}
+        onPress={togglePlayback}
+        label={isPlaying ? 'Stop' : 'Play'}
+      />
     </ScrollView>
   );
 }
@@ -326,220 +365,156 @@ const getStyles = (colors) =>
     container: {
       flex: 1,
       backgroundColor: colors.background,
-      padding: CONTAINER_PADDING,
     },
-    title: {
-      fontSize: 28,
-      fontWeight: 'bold',
-      color: colors.accent,
-      textAlign: 'center',
-      marginBottom: 24,
+    content: {
+      padding: spacing.xl,
+      paddingBottom: 48,
     },
     taalSelector: {
-      borderWidth: 1.5,
-      borderColor: colors.accent,
-      borderRadius: 12,
-      padding: 16,
-      marginBottom: 16,
+      flexDirection: 'row',
       alignItems: 'center',
+      backgroundColor: colors.surface,
+      borderWidth: 1,
+      borderColor: colors.border,
+      borderRadius: radius.lg,
+      padding: spacing.lg,
+      marginBottom: spacing.lg,
     },
     taalName: {
-      fontSize: 22,
-      fontWeight: 'bold',
+      fontSize: 24,
+      fontWeight: '800',
       color: colors.text,
+      marginTop: 2,
     },
     taalMeta: {
-      fontSize: 14,
+      fontSize: 13,
       color: colors.textSecondary,
+      marginTop: 2,
+    },
+    pendingText: {
+      fontSize: 12,
+      fontWeight: '600',
       marginTop: 4,
     },
-    taalChangeHint: {
-      color: colors.accent,
-      fontSize: 13,
-      fontWeight: '600',
-      marginTop: 8,
+    chevron: {
+      width: 36,
+      height: 36,
+      borderRadius: 18,
+      alignItems: 'center',
+      justifyContent: 'center',
     },
-    taalList: {
-      backgroundColor: colors.surface,
-      borderRadius: 12,
-      padding: 8,
-      marginBottom: 16,
+    pickerDivider: {
+      marginTop: spacing.md,
+      marginBottom: spacing.xs,
+      marginHorizontal: spacing.md,
     },
     taalOption: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      alignItems: 'center',
       paddingVertical: 12,
-      paddingHorizontal: 16,
-      borderRadius: 8,
-    },
-    taalOptionActive: {
-      backgroundColor: colors.buttonBg,
+      paddingHorizontal: spacing.md,
+      borderRadius: radius.sm,
     },
     taalOptionText: {
       color: colors.text,
       fontSize: 16,
     },
-    taalOptionTextActive: {
-      color: colors.accent,
-      fontWeight: '600',
+    taalOptionMeta: {
+      fontSize: 13,
     },
     thekaContainer: {
       flexDirection: 'row',
-      flexWrap: 'nowrap',
-      gap: MATRA_GAP,
-      marginBottom: 24,
+      flexWrap: 'wrap',
       justifyContent: 'center',
+      rowGap: spacing.md,
+      columnGap: spacing.lg,
+      marginBottom: spacing.xl,
+    },
+    vibhagGroup: {
+      alignItems: 'flex-start',
+    },
+    vibhagMarker: {
+      fontSize: 13,
+      fontWeight: '800',
+      marginBottom: 4,
+      marginLeft: 2,
+    },
+    vibhagRow: {
+      flexDirection: 'row',
+      gap: 5,
     },
     matraWrapper: {
       alignItems: 'center',
-      minWidth: MATRA_MIN_WIDTH,
-    },
-    vibhagMarker: {
-      color: colors.accent,
-      fontSize: 14,
-      fontWeight: 'bold',
-      marginBottom: 2,
     },
     matraBox: {
-      backgroundColor: colors.surface,
-      borderRadius: 8,
-      paddingVertical: 10,
-      paddingHorizontal: 8,
-      minWidth: MATRA_MIN_WIDTH,
+      borderRadius: radius.sm,
+      borderWidth: 1.5,
+      paddingVertical: 9,
+      paddingHorizontal: 6,
+      minWidth: 46,
       alignItems: 'center',
     },
-    matraBoxActive: {
-      backgroundColor: colors.accent,
-    },
-    matraBoxSam: {
-      borderWidth: 2,
-      borderColor: colors.accent,
-    },
     matraText: {
-      color: colors.text,
-      fontSize: 13,
-      fontWeight: '500',
-    },
-    matraTextActive: {
-      color: colors.background,
-      fontWeight: 'bold',
+      fontSize: 12,
+      fontWeight: '600',
     },
     matraNumber: {
-      color: colors.textSecondary,
       fontSize: 10,
-      marginTop: 2,
+      marginTop: 3,
     },
     infoBox: {
       borderWidth: 1.5,
-      borderColor: colors.border,
-      borderRadius: 12,
-      padding: 20,
-      marginBottom: 20,
+      borderRadius: radius.xl,
+      paddingVertical: 24,
+      marginBottom: spacing.lg,
       alignItems: 'center',
-      alignSelf: 'center',
-      aspectRatio: 1,
-      justifyContent: 'center',
-      minWidth: 160,
-    },
-    recordingDotRow: {
-      position: 'absolute',
-      top: 10,
-      right: 10,
     },
     recordingDot: {
+      position: 'absolute',
+      top: 12,
+      right: 14,
       width: 10,
       height: 10,
       borderRadius: 5,
-      backgroundColor: colors.danger,
     },
     infoBol: {
-      color: colors.accent,
-      fontSize: 36,
-      fontWeight: 'bold',
+      fontSize: 40,
+      fontWeight: '800',
+      letterSpacing: 0.5,
     },
     infoBeat: {
-      color: colors.text,
-      fontSize: 20,
-      fontWeight: 'bold',
+      fontSize: 16,
+      fontWeight: '700',
       marginTop: 6,
     },
-    infoBpm: {
-      color: colors.textSecondary,
-      fontSize: 16,
-      marginTop: 4,
-      marginBottom: 8,
-    },
     tapHint: {
-      color: colors.textSecondary,
       fontSize: 12,
+      marginTop: 10,
     },
-    sliderSection: {
-      backgroundColor: colors.surface,
-      borderRadius: 12,
-      padding: 16,
-      marginBottom: 20,
-    },
-    sliderRow: {
+    bpmRow: {
       flexDirection: 'row',
       alignItems: 'center',
-      gap: 10,
+      gap: spacing.sm,
     },
     bpmNudge: {
       width: 44,
       height: 44,
       borderRadius: 22,
-      backgroundColor: colors.buttonBg,
       alignItems: 'center',
       justifyContent: 'center',
     },
     bpmNudgeText: {
-      color: colors.text,
       fontSize: 14,
-      fontWeight: 'bold',
+      fontWeight: '700',
     },
-    sliderTrack: {
-      flex: 1,
-      height: 8,
-      backgroundColor: colors.background,
-      borderRadius: 4,
-      justifyContent: 'center',
-      overflow: 'visible',
-    },
-    sliderFill: {
-      height: 8,
-      backgroundColor: colors.accent,
-      borderRadius: 4,
-    },
-    sliderThumb: {
-      position: 'absolute',
-      width: 24,
-      height: 24,
-      borderRadius: 12,
-      backgroundColor: colors.accent,
-      marginLeft: -12,
-      top: -8,
-    },
-    sliderLabels: {
+    bpmScaleRow: {
       flexDirection: 'row',
       justifyContent: 'space-between',
       marginTop: 6,
-      paddingHorizontal: 54,
+      paddingHorizontal: 56,
     },
-    sliderLabelText: {
-      color: colors.textSecondary,
-      fontSize: 12,
-    },
-    playButton: {
-      backgroundColor: colors.buttonBg,
-      borderRadius: 16,
-      paddingVertical: 18,
-      alignItems: 'center',
-      marginBottom: 40,
-    },
-    playButtonActive: {
-      backgroundColor: colors.danger,
-    },
-    playButtonText: {
-      color: colors.text,
-      fontSize: 20,
-      fontWeight: 'bold',
+    bpmScaleText: {
+      fontSize: 11,
     },
   });

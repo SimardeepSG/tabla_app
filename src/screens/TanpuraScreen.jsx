@@ -1,3 +1,8 @@
+/**
+ * Tanpura tab: choose your Sa on a harmonium keyboard, tune each of the
+ * 4 strings (swar + saptak), set pluck speed, mix volumes, and play the
+ * drone. The selected scale is saved and restored between launches.
+ */
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import {
   View,
@@ -5,12 +10,18 @@ import {
   StyleSheet,
   TouchableOpacity,
   ScrollView,
+  Animated,
   useWindowDimensions,
 } from 'react-native';
 import { TanpuraEngine } from '../audio/TanpuraEngine';
+import { SAMPLE_SET, SAMPLE_ROOT } from '../audio/tanpuraSamples';
 import { useVolume } from '../audio/VolumeContext';
-import { useTheme } from '../utils/ThemeContext';
+import { useTheme, spacing, radius, type } from '../utils/ThemeContext';
 import { useTanpuraPlayback } from '../audio/TanpuraPlaybackContext';
+import { getPreference, setPreference } from '../db/database';
+import { Card } from '../components/ui/Card';
+import PlayButton from '../components/ui/PlayButton';
+import Slider from '../components/ui/Slider';
 
 const SCALE_OPTIONS = [
   'C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B',
@@ -23,9 +34,9 @@ const SWAR_OPTIONS = [
 ];
 
 const SWAR_LABELS = {
-  Sa: 'Sa', Re_komal: 'Re\u266d', Re: 'Re', Ga_komal: 'Ga\u266d', Ga: 'Ga',
-  Ma: 'Ma', Ma_tivra: 'Ma\u266f', Pa: 'Pa', Dha_komal: 'Dha\u266d', Dha: 'Dha',
-  Ni_komal: 'Ni\u266d', Ni: 'Ni',
+  Sa: 'Sa', Re_komal: 'Re♭', Re: 'Re', Ga_komal: 'Ga♭', Ga: 'Ga',
+  Ma: 'Ma', Ma_tivra: 'Ma♯', Pa: 'Pa', Dha_komal: 'Dha♭', Dha: 'Dha',
+  Ni_komal: 'Ni♭', Ni: 'Ni',
 };
 
 const SAPTAK_OPTIONS = ['mandra', 'madhya', 'taar'];
@@ -33,14 +44,25 @@ const SAPTAK_LABELS = {
   mandra: 'Mandra', madhya: 'Madhya', taar: 'Taar',
 };
 
+/**
+ * Semitone distance from the sample's recorded root to the chosen Sa,
+ * wrapped to [-5, +6] so playback rates stay in a musical range.
+ */
+function scaleOffsetFor(scale) {
+  const rootIdx = SCALE_OPTIONS.indexOf(SAMPLE_ROOT);
+  const scaleIdx = SCALE_OPTIONS.indexOf(scale);
+  return ((scaleIdx - rootIdx + 5 + 144) % 12) - 5;
+}
+
+// Traditional 4-string tuning: Pa (mandra) · Sa · Sa · Sa (mandra kharaj)
 const DEFAULT_CONFIG = {
   pattern: [
+    { swar: 'Pa', saptak: 'mandra' },
     { swar: 'Sa', saptak: 'madhya' },
-    { swar: 'Pa', saptak: 'madhya' },
-    { swar: 'Sa', saptak: 'taar' },
-    { swar: 'Sa', saptak: 'taar' },
+    { swar: 'Sa', saptak: 'madhya' },
+    { swar: 'Sa', saptak: 'mandra' },
   ],
-  basePitchHz: 261.63,
+  scaleOffset: 0,
   speed: 1.0,
 };
 
@@ -61,13 +83,13 @@ function HarmoniumKeyboard({ selectedScale, onSelectScale, colors }) {
   const keyboardWidth = Math.min(availableWidth, MAX_KEYBOARD_WIDTH);
   const whiteKeyWidth = keyboardWidth / 7;
   const blackKeyWidth = whiteKeyWidth * 0.6;
-  const whiteKeyHeight = 80;
-  const blackKeyHeight = 50;
+  const whiteKeyHeight = 84;
+  const blackKeyHeight = 52;
 
   return (
-    <View style={{ height: whiteKeyHeight + 4, marginTop: 12, alignItems: 'center' }}>
+    <View style={{ height: whiteKeyHeight + 4, marginTop: 14, alignItems: 'center' }}>
       <View style={{ flexDirection: 'row', height: whiteKeyHeight, width: keyboardWidth }}>
-        {WHITE_NOTES.map((note, i) => {
+        {WHITE_NOTES.map((note) => {
           const isSelected = note === selectedScale;
           return (
             <TouchableOpacity
@@ -77,11 +99,11 @@ function HarmoniumKeyboard({ selectedScale, onSelectScale, colors }) {
               style={{
                 width: whiteKeyWidth,
                 height: whiteKeyHeight,
-                backgroundColor: isSelected ? colors.accent : '#F5F5F0',
+                backgroundColor: isSelected ? colors.accent : '#F7F5EF',
                 borderWidth: 1,
-                borderColor: colors.border,
-                borderBottomLeftRadius: 4,
-                borderBottomRightRadius: 4,
+                borderColor: colors.isDark ? '#00000055' : colors.border,
+                borderBottomLeftRadius: 5,
+                borderBottomRightRadius: 5,
                 justifyContent: 'flex-end',
                 alignItems: 'center',
                 paddingBottom: 6,
@@ -89,8 +111,8 @@ function HarmoniumKeyboard({ selectedScale, onSelectScale, colors }) {
             >
               <Text style={{
                 fontSize: 10,
-                fontWeight: isSelected ? 'bold' : '400',
-                color: isSelected ? colors.background : '#666',
+                fontWeight: isSelected ? 'bold' : '500',
+                color: isSelected ? colors.onAccent : '#666',
               }}>
                 {note}
               </Text>
@@ -98,7 +120,7 @@ function HarmoniumKeyboard({ selectedScale, onSelectScale, colors }) {
                 <Text style={{
                   fontSize: 8,
                   fontWeight: 'bold',
-                  color: colors.background,
+                  color: colors.onAccent,
                   marginTop: 1,
                 }}>
                   Sa
@@ -111,7 +133,6 @@ function HarmoniumKeyboard({ selectedScale, onSelectScale, colors }) {
       {/* Black keys overlaid */}
       {BLACK_NOTES.map(({ note, afterWhite }) => {
         const isSelected = note === selectedScale;
-        const halfKeyboard = (MAX_KEYBOARD_WIDTH - keyboardWidth) / 2;
         const leftPos = (afterWhite + 1) * whiteKeyWidth - blackKeyWidth / 2 + (availableWidth > MAX_KEYBOARD_WIDTH ? (availableWidth - MAX_KEYBOARD_WIDTH) / 2 : 0);
         return (
           <TouchableOpacity
@@ -124,7 +145,7 @@ function HarmoniumKeyboard({ selectedScale, onSelectScale, colors }) {
               top: 0,
               width: blackKeyWidth,
               height: blackKeyHeight,
-              backgroundColor: isSelected ? colors.accent : '#1A1A1A',
+              backgroundColor: isSelected ? colors.accent : '#181818',
               borderBottomLeftRadius: 4,
               borderBottomRightRadius: 4,
               justifyContent: 'flex-end',
@@ -136,7 +157,7 @@ function HarmoniumKeyboard({ selectedScale, onSelectScale, colors }) {
             <Text style={{
               fontSize: 8,
               fontWeight: isSelected ? 'bold' : '400',
-              color: isSelected ? colors.background : '#999',
+              color: isSelected ? colors.onAccent : '#999',
             }}>
               {note}
             </Text>
@@ -144,7 +165,7 @@ function HarmoniumKeyboard({ selectedScale, onSelectScale, colors }) {
               <Text style={{
                 fontSize: 7,
                 fontWeight: 'bold',
-                color: colors.background,
+                color: colors.onAccent,
                 marginTop: 1,
               }}>
                 Sa
@@ -157,83 +178,75 @@ function HarmoniumKeyboard({ selectedScale, onSelectScale, colors }) {
   );
 }
 
-function VolumeSlider({ label, value, onValueChange, colors }) {
-  const percentage = Math.round(value * 100);
-  const trackRef = useRef(null);
-  const trackXRef = useRef(0);
-  const trackWidthRef = useRef(200);
+/** One tanpura string as a vertical card; glows while it is sounding. */
+function StringCard({ index, note, isSounding, isEditing, onPress, colors }) {
+  const glow = useRef(new Animated.Value(0)).current;
 
-  const handleLayout = () => {
-    if (trackRef.current) {
-      trackRef.current.measure((x, y, width, height, pageX) => {
-        trackXRef.current = pageX;
-        trackWidthRef.current = width;
-      });
+  useEffect(() => {
+    if (isSounding) {
+      glow.setValue(1);
+      Animated.timing(glow, {
+        toValue: 0,
+        duration: 700,
+        useNativeDriver: false,
+      }).start();
     }
-  };
+  }, [isSounding]);
 
-  const handleTouch = (e) => {
-    const pageX = e.nativeEvent.pageX;
-    const ratio = Math.max(0, Math.min(1, (pageX - trackXRef.current) / trackWidthRef.current));
-    onValueChange(Math.round(ratio * 100) / 100);
-  };
+  const bg = glow.interpolate({
+    inputRange: [0, 1],
+    outputRange: [colors.surface, colors.accentSoft.replace(/[\d.]+\)$/, '0.45)')],
+  });
 
   return (
-    <View style={volStyles.row}>
-      <Text style={[volStyles.label, { color: colors.textSecondary }]}>{label}</Text>
-      <View
-        ref={trackRef}
-        style={[volStyles.track, { backgroundColor: colors.background }]}
-        onLayout={handleLayout}
-        onStartShouldSetResponder={() => true}
-        onMoveShouldSetResponder={() => true}
-        onResponderGrant={handleTouch}
-        onResponderMove={handleTouch}
+    <TouchableOpacity activeOpacity={0.75} onPress={onPress} style={{ flex: 1 }}>
+      <Animated.View
+        style={[
+          stringStyles.card,
+          {
+            backgroundColor: bg,
+            borderColor: isEditing ? colors.accent : colors.border,
+          },
+        ]}
       >
-        <View style={[volStyles.fill, { width: `${percentage}%`, backgroundColor: colors.accent }]} />
-        <View style={[volStyles.thumb, { left: `${percentage}%`, backgroundColor: colors.accent }]} />
-      </View>
-      <Text style={[volStyles.pct, { color: colors.textSecondary }]}>{percentage}%</Text>
-    </View>
+        <View style={[stringStyles.stringLine, { backgroundColor: isSounding ? colors.accent : colors.textTertiary }]} />
+        <Text style={[stringStyles.swar, { color: colors.text }]}>
+          {SWAR_LABELS[note.swar]}
+        </Text>
+        <Text style={[stringStyles.saptak, { color: colors.textSecondary }]}>
+          {SAPTAK_LABELS[note.saptak]}
+        </Text>
+        <Text style={[stringStyles.number, { color: colors.textTertiary }]}>{index + 1}</Text>
+      </Animated.View>
+    </TouchableOpacity>
   );
 }
 
-const volStyles = StyleSheet.create({
-  row: {
-    flexDirection: 'row',
+const stringStyles = StyleSheet.create({
+  card: {
+    borderRadius: radius.md,
+    borderWidth: 1.5,
+    paddingVertical: 14,
     alignItems: 'center',
-    marginBottom: 12,
+    marginHorizontal: 3,
   },
-  label: {
-    fontSize: 13,
-    width: 70,
+  stringLine: {
+    width: 2,
+    height: 22,
+    borderRadius: 1,
+    marginBottom: 8,
   },
-  track: {
-    flex: 1,
-    height: 6,
-    borderRadius: 3,
-    justifyContent: 'center',
-    overflow: 'visible',
-    marginHorizontal: 10,
+  swar: {
+    fontSize: 17,
+    fontWeight: '700',
   },
-  fill: {
-    position: 'absolute',
-    left: 0,
-    height: 6,
-    borderRadius: 3,
+  saptak: {
+    fontSize: 11,
+    marginTop: 2,
   },
-  thumb: {
-    position: 'absolute',
-    width: 18,
-    height: 18,
-    borderRadius: 9,
-    marginLeft: -9,
-    top: -6,
-  },
-  pct: {
-    fontSize: 12,
-    width: 36,
-    textAlign: 'right',
+  number: {
+    fontSize: 10,
+    marginTop: 6,
   },
 });
 
@@ -241,7 +254,7 @@ export default function TanpuraScreen() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [config, setConfig] = useState(DEFAULT_CONFIG);
   const [editingString, setEditingString] = useState(null);
-  const [scaleIndex, setScaleIndex] = useState(0);
+  const [scaleIndex, setScaleIndex] = useState(SCALE_OPTIONS.indexOf(SAMPLE_ROOT));
   const engineRef = useRef(null);
   const [currentString, setCurrentString] = useState(0);
   const { colors } = useTheme();
@@ -261,19 +274,41 @@ export default function TanpuraScreen() {
     updatePlayback({ isPlaying, currentString, pattern: config.pattern });
   }, [isPlaying, currentString, config.pattern]);
 
+  // Restore saved scale
+  useEffect(() => {
+    getPreference('tanpura_scale')
+      .then((saved) => {
+        if (saved && SCALE_OPTIONS.includes(saved)) {
+          applyScale(SCALE_OPTIONS.indexOf(saved), false);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  const applyScale = (index, persist = true) => {
+    setScaleIndex(index);
+    const scale = SCALE_OPTIONS[index];
+    const newConfig = { ...configRef.current, scaleOffset: scaleOffsetFor(scale) };
+    configRef.current = newConfig;
+    setConfig(newConfig);
+    engineRef.current?.updateConfig({ scaleOffset: newConfig.scaleOffset });
+    if (persist) setPreference('tanpura_scale', scale).catch(() => {});
+  };
+
+  // Keep a ref of config so async callbacks see the latest value
+  const configRef = useRef(DEFAULT_CONFIG);
+  useEffect(() => {
+    configRef.current = config;
+  }, [config]);
+
   const cycleScale = (direction) => {
-    setScaleIndex((prev) => {
-      const next = prev + direction;
-      if (next < 0) return SCALE_OPTIONS.length - 1;
-      if (next >= SCALE_OPTIONS.length) return 0;
-      return next;
-    });
+    const next = (scaleIndex + direction + SCALE_OPTIONS.length) % SCALE_OPTIONS.length;
+    applyScale(next);
   };
 
   const togglePlayback = useCallback(async () => {
     if (!engineRef.current) {
-      const placeholderSample = require('../../assets/samples/tanpura/sa.wav');
-      engineRef.current = new TanpuraEngine(placeholderSample, config);
+      engineRef.current = new TanpuraEngine(SAMPLE_SET, configRef.current);
       engineRef.current.onString = (index) => {
         setCurrentString(index);
       };
@@ -287,14 +322,14 @@ export default function TanpuraScreen() {
       await engineRef.current.start();
     }
     setIsPlaying(!isPlaying);
-  }, [isPlaying, config]);
+  }, [isPlaying]);
 
   const updateStringNote = (stringIndex, swar) => {
     const newPattern = [...config.pattern];
     newPattern[stringIndex] = { ...newPattern[stringIndex], swar };
     const newConfig = { ...config, pattern: newPattern };
     setConfig(newConfig);
-    engineRef.current?.updateConfig(newConfig);
+    engineRef.current?.updateConfig({ pattern: newPattern });
   };
 
   const updateStringSaptak = (stringIndex, saptak) => {
@@ -302,181 +337,142 @@ export default function TanpuraScreen() {
     newPattern[stringIndex] = { ...newPattern[stringIndex], saptak };
     const newConfig = { ...config, pattern: newPattern };
     setConfig(newConfig);
-    engineRef.current?.updateConfig(newConfig);
+    engineRef.current?.updateConfig({ pattern: newPattern });
   };
 
-  const updateSpeed = (delta) => {
-    const newSpeed = Math.max(0.5, Math.min(2.0, config.speed + delta));
-    const newConfig = { ...config, speed: newSpeed };
+  const updateSpeed = (speed) => {
+    const clamped = Math.max(0.5, Math.min(2.0, speed));
+    const newConfig = { ...config, speed: clamped };
     setConfig(newConfig);
-    engineRef.current?.updateConfig(newConfig);
+    engineRef.current?.updateConfig({ speed: clamped });
   };
-
-  const noteLabel = (note) =>
-    `${SWAR_LABELS[note.swar]} (${SAPTAK_LABELS[note.saptak]})`;
 
   const styles = getStyles(colors);
 
   return (
-    <ScrollView style={styles.container}>
-      <Text style={styles.title}>Tanpura</Text>
-
-      {/* Scale selector — at the top */}
-      <View style={styles.scaleSection}>
+    <ScrollView style={styles.container} contentContainerStyle={styles.content}>
+      {/* Scale selector */}
+      <Card label="Scale">
         <View style={styles.scaleRow}>
           <TouchableOpacity style={styles.scaleArrow} onPress={() => cycleScale(-1)}>
-            <Text style={styles.scaleArrowText}>{'\u25C0'}</Text>
+            <Text style={styles.scaleArrowText}>{'◀'}</Text>
           </TouchableOpacity>
           <View style={styles.scaleCenter}>
-            <Text style={styles.scaleLabelSmall}>Scale</Text>
             <Text style={styles.scaleText}>{SCALE_OPTIONS[scaleIndex]}</Text>
+            <Text style={styles.scaleSub}>Sa</Text>
           </View>
           <TouchableOpacity style={styles.scaleArrow} onPress={() => cycleScale(1)}>
-            <Text style={styles.scaleArrowText}>{'\u25B6'}</Text>
+            <Text style={styles.scaleArrowText}>{'▶'}</Text>
           </TouchableOpacity>
         </View>
 
-        {/* Harmonium keyboard */}
         <HarmoniumKeyboard
           selectedScale={SCALE_OPTIONS[scaleIndex]}
-          onSelectScale={(note) => setScaleIndex(SCALE_OPTIONS.indexOf(note))}
+          onSelectScale={(note) => applyScale(SCALE_OPTIONS.indexOf(note))}
           colors={colors}
         />
-      </View>
+      </Card>
 
-      {/* Master volume */}
-      <View style={styles.volumeSection}>
-        <Text style={styles.volumeSectionTitle}>Master</Text>
-        <VolumeSlider
-          label="Volume"
-          value={masterVolume}
-          onValueChange={updateMasterVolume}
-          colors={colors}
-        />
-      </View>
-
-      {/* Tanpura & Tabla volumes */}
-      <View style={styles.volumeSection}>
-        <VolumeSlider
-          label="Tanpura"
-          value={tanpuraVolume}
-          onValueChange={updateTanpuraVolume}
-          colors={colors}
-        />
-        <VolumeSlider
-          label="Tabla"
-          value={tablaVolume}
-          onValueChange={updateTablaVolume}
-          colors={colors}
-        />
-      </View>
-
-      {/* String pattern display */}
+      {/* Strings */}
+      <Text style={[type.label, styles.sectionLabel]}>Strings</Text>
       <View style={styles.patternContainer}>
         {config.pattern.map((note, i) => (
-          <TouchableOpacity
+          <StringCard
             key={i}
-            style={[
-              styles.stringButton,
-              editingString === i && styles.stringButtonActive,
-            ]}
+            index={i}
+            note={note}
+            isSounding={isPlaying && currentString === i}
+            isEditing={editingString === i}
             onPress={() => setEditingString(editingString === i ? null : i)}
-          >
-            <Text style={styles.stringLabel}>String {i + 1}</Text>
-            <Text style={styles.stringNote}>{noteLabel(note)}</Text>
-          </TouchableOpacity>
+            colors={colors}
+          />
         ))}
       </View>
 
       {/* Note editor for selected string */}
       {editingString !== null && (
-        <View style={styles.editorContainer}>
-          <Text style={styles.editorTitle}>
-            Edit String {editingString + 1}
-          </Text>
-
+        <Card label={`String ${editingString + 1}`} elevated>
           <Text style={styles.editorLabel}>Swar</Text>
           <View style={styles.optionRow}>
-            {SWAR_OPTIONS.map((swar) => (
-              <TouchableOpacity
-                key={swar}
-                style={[
-                  styles.optionButton,
-                  config.pattern[editingString].swar === swar &&
-                    styles.optionButtonActive,
-                ]}
-                onPress={() => updateStringNote(editingString, swar)}
-              >
-                <Text
+            {SWAR_OPTIONS.map((swar) => {
+              const active = config.pattern[editingString].swar === swar;
+              return (
+                <TouchableOpacity
+                  key={swar}
                   style={[
-                    styles.optionText,
-                    config.pattern[editingString].swar === swar &&
-                      styles.optionTextActive,
+                    styles.optionButton,
+                    { backgroundColor: active ? colors.accent : colors.buttonBg },
                   ]}
+                  onPress={() => updateStringNote(editingString, swar)}
                 >
-                  {SWAR_LABELS[swar]}
-                </Text>
-              </TouchableOpacity>
-            ))}
+                  <Text style={[styles.optionText, { color: active ? colors.onAccent : colors.text }]}>
+                    {SWAR_LABELS[swar]}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
           </View>
 
           <Text style={styles.editorLabel}>Saptak</Text>
           <View style={styles.optionRow}>
-            {SAPTAK_OPTIONS.map((saptak) => (
-              <TouchableOpacity
-                key={saptak}
-                style={[
-                  styles.optionButton,
-                  config.pattern[editingString].saptak === saptak &&
-                    styles.optionButtonActive,
-                ]}
-                onPress={() => updateStringSaptak(editingString, saptak)}
-              >
-                <Text
+            {SAPTAK_OPTIONS.map((saptak) => {
+              const active = config.pattern[editingString].saptak === saptak;
+              return (
+                <TouchableOpacity
+                  key={saptak}
                   style={[
-                    styles.optionText,
-                    config.pattern[editingString].saptak === saptak &&
-                      styles.optionTextActive,
+                    styles.optionButton,
+                    { backgroundColor: active ? colors.accent : colors.buttonBg },
                   ]}
+                  onPress={() => updateStringSaptak(editingString, saptak)}
                 >
-                  {SAPTAK_LABELS[saptak]}
-                </Text>
-              </TouchableOpacity>
-            ))}
+                  <Text style={[styles.optionText, { color: active ? colors.onAccent : colors.text }]}>
+                    {SAPTAK_LABELS[saptak]}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
           </View>
-        </View>
+        </Card>
       )}
 
-      {/* Speed control */}
-      <View style={styles.speedContainer}>
-        <Text style={styles.speedLabel}>
-          Speed: {config.speed.toFixed(1)}x
-        </Text>
-        <View style={styles.speedButtons}>
-          <TouchableOpacity
-            style={styles.speedButton}
-            onPress={() => updateSpeed(-0.1)}
-          >
-            <Text style={styles.speedButtonText}>-</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={styles.speedButton}
-            onPress={() => updateSpeed(0.1)}
-          >
-            <Text style={styles.speedButtonText}>+</Text>
-          </TouchableOpacity>
-        </View>
-      </View>
+      {/* Pluck speed */}
+      <Card label={`Pluck speed · ${config.speed.toFixed(1)}×`}>
+        <Slider
+          value={(config.speed - 0.5) / 1.5}
+          onValueChange={(r) => updateSpeed(Math.round((0.5 + r * 1.5) * 10) / 10)}
+        />
+      </Card>
 
-      {/* Play/Stop */}
-      <TouchableOpacity
-        style={[styles.playButton, isPlaying && styles.playButtonActive]}
+      {/* Mixer */}
+      <Card label="Mixer">
+        <View style={{ gap: 14 }}>
+          <Slider
+            label="Master"
+            value={masterVolume}
+            onValueChange={updateMasterVolume}
+            valueText={`${Math.round(masterVolume * 100)}%`}
+          />
+          <Slider
+            label="Tanpura"
+            value={tanpuraVolume}
+            onValueChange={updateTanpuraVolume}
+            valueText={`${Math.round(tanpuraVolume * 100)}%`}
+          />
+          <Slider
+            label="Tabla"
+            value={tablaVolume}
+            onValueChange={updateTablaVolume}
+            valueText={`${Math.round(tablaVolume * 100)}%`}
+          />
+        </View>
+      </Card>
+
+      <PlayButton
+        isPlaying={isPlaying}
         onPress={togglePlayback}
-      >
-        <Text style={styles.playButtonText}>
-          {isPlaying ? 'Stop' : 'Play'}
-        </Text>
-      </TouchableOpacity>
+        label={isPlaying ? 'Stop' : 'Play'}
+      />
     </ScrollView>
   );
 }
@@ -486,20 +482,15 @@ const getStyles = (colors) =>
     container: {
       flex: 1,
       backgroundColor: colors.background,
-      padding: 20,
     },
-    title: {
-      fontSize: 28,
-      fontWeight: 'bold',
-      color: colors.accent,
-      textAlign: 'center',
-      marginBottom: 24,
+    content: {
+      padding: spacing.xl,
+      paddingBottom: 48,
     },
-    scaleSection: {
-      backgroundColor: colors.surface,
-      borderRadius: 12,
-      padding: 12,
-      marginBottom: 20,
+    sectionLabel: {
+      color: colors.textSecondary,
+      marginBottom: spacing.sm,
+      marginLeft: 2,
     },
     scaleRow: {
       flexDirection: 'row',
@@ -516,79 +507,31 @@ const getStyles = (colors) =>
     },
     scaleArrowText: {
       color: colors.accent,
-      fontSize: 18,
+      fontSize: 16,
     },
     scaleCenter: {
       alignItems: 'center',
-      marginHorizontal: 24,
-    },
-    scaleLabelSmall: {
-      fontSize: 11,
-      color: colors.textSecondary,
-      marginBottom: 2,
+      marginHorizontal: 28,
+      minWidth: 60,
     },
     scaleText: {
       color: colors.text,
-      fontSize: 32,
-      fontWeight: 'bold',
-      minWidth: 50,
-      textAlign: 'center',
+      fontSize: 36,
+      fontWeight: '800',
     },
-    volumeSection: {
-      backgroundColor: colors.surface,
-      borderRadius: 12,
-      padding: 14,
-      marginBottom: 14,
-    },
-    volumeSectionTitle: {
-      color: colors.accent,
-      fontSize: 14,
+    scaleSub: {
+      color: colors.textTertiary,
+      fontSize: 11,
       fontWeight: '600',
-      marginBottom: 10,
+      marginTop: -2,
     },
     patternContainer: {
       flexDirection: 'row',
-      justifyContent: 'space-between',
-      marginBottom: 20,
-    },
-    stringButton: {
-      flex: 1,
-      backgroundColor: colors.surface,
-      borderRadius: 12,
-      padding: 12,
-      marginHorizontal: 4,
-      alignItems: 'center',
-      borderWidth: 2,
-      borderColor: 'transparent',
-    },
-    stringButtonActive: {
-      borderColor: colors.accent,
-    },
-    stringLabel: {
-      fontSize: 12,
-      color: colors.textSecondary,
-      marginBottom: 4,
-    },
-    stringNote: {
-      fontSize: 14,
-      fontWeight: '600',
-      color: colors.text,
-      textAlign: 'center',
-    },
-    editorContainer: {
-      backgroundColor: colors.surface,
-      borderRadius: 12,
-      padding: 16,
-      marginBottom: 20,
-    },
-    editorTitle: {
-      fontSize: 16,
-      fontWeight: '600',
-      color: colors.accent,
-      marginBottom: 12,
+      marginBottom: spacing.lg,
+      marginHorizontal: -3,
     },
     editorLabel: {
-      fontSize: 14,
+      fontSize: 13,
       color: colors.textSecondary,
       marginBottom: 8,
     },
@@ -596,68 +539,15 @@ const getStyles = (colors) =>
       flexDirection: 'row',
       flexWrap: 'wrap',
       gap: 8,
-      marginBottom: 16,
+      marginBottom: spacing.lg,
     },
     optionButton: {
       paddingHorizontal: 14,
       paddingVertical: 8,
-      borderRadius: 8,
-      backgroundColor: colors.buttonBg,
-    },
-    optionButtonActive: {
-      backgroundColor: colors.accent,
+      borderRadius: radius.sm,
     },
     optionText: {
-      color: colors.text,
       fontSize: 13,
-      fontWeight: '500',
-    },
-    optionTextActive: {
-      color: colors.background,
-    },
-    speedContainer: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      justifyContent: 'space-between',
-      backgroundColor: colors.surface,
-      borderRadius: 12,
-      padding: 16,
-      marginBottom: 20,
-    },
-    speedLabel: {
-      fontSize: 16,
-      color: colors.text,
-    },
-    speedButtons: {
-      flexDirection: 'row',
-      gap: 12,
-    },
-    speedButton: {
-      width: 44,
-      height: 44,
-      borderRadius: 22,
-      backgroundColor: colors.buttonBg,
-      alignItems: 'center',
-      justifyContent: 'center',
-    },
-    speedButtonText: {
-      color: colors.text,
-      fontSize: 20,
-      fontWeight: 'bold',
-    },
-    playButton: {
-      backgroundColor: colors.buttonBg,
-      borderRadius: 16,
-      paddingVertical: 18,
-      alignItems: 'center',
-      marginBottom: 40,
-    },
-    playButtonActive: {
-      backgroundColor: colors.danger,
-    },
-    playButtonText: {
-      color: colors.text,
-      fontSize: 20,
-      fontWeight: 'bold',
+      fontWeight: '600',
     },
   });
