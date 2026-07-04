@@ -1,3 +1,8 @@
+/**
+ * Local SQLite storage (offline-first, nothing leaves the device):
+ * custom taals, taal variations, and key/value user preferences,
+ * plus a clearAllData() wipe used by the Delete My Data page.
+ */
 import * as SQLite from 'expo-sqlite';
 
 const DB_NAME = 'tabla_app.db';
@@ -131,4 +136,20 @@ export async function getPreference(key) {
     key,
   );
   return row?.value ?? null;
+}
+
+// ── Data deletion ─────────────────────────────────────────────
+
+/**
+ * Erase everything this app has stored on the device: custom taals,
+ * taal variations, and saved preferences. Used by the Delete My Data
+ * page. There is no server copy — once cleared, the data is gone.
+ */
+export async function clearAllData() {
+  const database = await getDatabase();
+  await database.execAsync(`
+    DELETE FROM custom_taals;
+    DELETE FROM taal_variations;
+    DELETE FROM user_preferences;
+  `);
 }

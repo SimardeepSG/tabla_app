@@ -1,3 +1,8 @@
+/**
+ * Root layout: wraps the whole app in its providers (theme, volume,
+ * playback state) and defines the bottom tab navigation. Also mounts the
+ * mini playback widget overlay and the hidden store-compliance routes.
+ */
 import React from 'react';
 import { View } from 'react-native';
 import { Tabs, usePathname } from 'expo-router';
@@ -79,6 +84,11 @@ function TabsLayout() {
             ),
           }}
         />
+        {/* Store-compliance pages: routable at /privacy, /delete-account,
+            /version-history but hidden from the tab bar (href: null) */}
+        <Tabs.Screen name="privacy" options={{ title: 'Privacy Policy', href: null }} />
+        <Tabs.Screen name="delete-account" options={{ title: 'Delete My Data', href: null }} />
+        <Tabs.Screen name="version-history" options={{ title: 'Version History', href: null }} />
       </Tabs>
       <MiniWidgetOverlay />
     </View>
