@@ -2,8 +2,15 @@
  * Tabla tab: pick a taal (built-in or your own), see its theka laid out by
  * vibhag, set the tempo (slider, nudge buttons, or tap tempo), and play.
  * Changing taal mid-play queues the switch for the next sam (partaal).
+ *
+ * Two display modes (persisted, toggle at the top):
+ *   - Focus (default): one big box showing only the current beat's bol(s),
+ *     with the vibhag marker (X / 0 / 2 / 3 …) in the corner.
+ *   - Full: the whole theka laid out by vibhag with a per-beat highlight.
+ * Each theka cell is a memoized MatraBox, so advancing the beat only
+ * re-renders the two cells whose highlight changed, not the whole grid.
  */
-import React, { useState, useRef, useCallback, useEffect } from 'react';
+import React, { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import {
   View,
   Text,
@@ -12,6 +19,7 @@ import {
   ScrollView,
   Animated,
 } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useFocusEffect } from 'expo-router';
 import { TablaEngine } from '../audio/TablaEngine';
 import { STROKE_SAMPLES } from '../audio/tablaSamples';
@@ -26,6 +34,8 @@ import Slider from '../components/ui/Slider';
 
 const BPM_MIN = 20;
 const BPM_MAX = 300;
+
+const VIEW_STORAGE_KEY = '@tabla_app_view';
 
 const DEFAULT_CONFIG = {
   taal: BUILT_IN_TAALS[0],
@@ -63,6 +73,112 @@ function vibhagChunks(taal) {
   return chunks;
 }
 
+/**
+ * Which vibhag the given matra sits in, its marker label, whether it's the
+ * first matra of that vibhag (the clap/wave/sam moment) and whether it's khali.
+ */
+function vibhagMarkerFor(taal, labels, matra) {
+  let start = 0;
+  for (let v = 0; v < taal.vibhag.length; v++) {
+    const len = taal.vibhag[v];
+    if (matra >= start && matra < start + len) {
+      return {
+        label: labels[v],
+        isStart: matra === start,
+        isKhali: taal.khaliVibhag.includes(v),
+      };
+    }
+    start += len;
+  }
+  return null;
+}
+
+/**
+ * One theka cell. Memoized: it only re-renders when its own props change
+ * (bols by value, or its active/sam flags), so advancing the beat re-renders
+ * just the cell that lit up and the one that went dark.
+ */
+const MatraBox = React.memo(function MatraBox({ bols, number, isActive, isSam, colors, styles }) {
+  return (
+    <View style={styles.matraWrapper}>
+      <View
+        style={[
+          styles.matraBox,
+          { backgroundColor: colors.surface, borderColor: 'transparent' },
+          isSam && { borderColor: colors.accent },
+          isActive && { backgroundColor: colors.accent },
+        ]}
+      >
+        <Text
+          style={[styles.matraText, { color: isActive ? colors.onAccent : colors.text }]}
+          numberOfLines={1}
+        >
+          {bols}
+        </Text>
+      </View>
+      <Text style={[styles.matraNumber, { color: colors.textTertiary }]}>{number}</Text>
+    </View>
+  );
+});
+
+/**
+ * Focus view: a single large box showing only the current beat's bol(s), the
+ * vibhag marker in the corner, and doubling as the tap-tempo target.
+ */
+function FocusDisplay({
+  bols, beatNumber, totalBeats, marker, isSam, isPlaying, isTapping, onTapTempo, colors, styles,
+}) {
+  const showSamBorder = isSam && isPlaying;
+  return (
+    <TouchableOpacity activeOpacity={0.85} onPress={onTapTempo}>
+      <Animated.View
+        style={[
+          styles.focusBox,
+          {
+            backgroundColor: colors.surfaceElevated,
+            borderColor: showSamBorder ? colors.accent : colors.border,
+          },
+        ]}
+      >
+        {/* Corner vibhag marker shows only on a vibhag boundary (sam / clap /
+            khali) — the beats where it's musically meaningful. */}
+        {marker?.isStart && (
+          <View
+            style={[
+              styles.focusMarker,
+              { backgroundColor: marker.isKhali ? colors.buttonBg : colors.accentSoft },
+            ]}
+          >
+            <Text
+              style={[
+                styles.focusMarkerText,
+                { color: marker.isKhali ? colors.textSecondary : colors.accent },
+              ]}
+            >
+              {marker.label}
+            </Text>
+          </View>
+        )}
+        {isTapping && <View style={[styles.recordingDot, { backgroundColor: colors.danger }]} />}
+        <Text
+          style={[styles.focusBol, { color: colors.accent }]}
+          numberOfLines={1}
+          adjustsFontSizeToFit
+        >
+          {bols}
+        </Text>
+        <Text style={[styles.focusBeat, { color: colors.text }]}>
+          beat {beatNumber}
+          <Text style={{ color: colors.textTertiary }}> / {totalBeats}</Text>
+        </Text>
+        <Text style={[styles.tapHint, { color: colors.textTertiary }]}>
+          {isTapping ? 'keep tapping…' : 'tap in tempo to set BPM'}
+        </Text>
+      </Animated.View>
+    </TouchableOpacity>
+  );
+}
+
 export default function TablaScreen() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [config, setConfig] = useState(DEFAULT_CONFIG);
@@ -71,15 +187,29 @@ export default function TablaScreen() {
   const [customTaals, setCustomTaals] = useState([]);
   const [pendingTaal, setPendingTaal] = useState(null);
   const [isTapping, setIsTapping] = useState(false);
+  const [viewMode, setViewMode] = useState('focus');
   const engineRef = useRef(null);
   const pendingTaalRef = useRef(null);
   const tapTimesRef = useRef([]);
   const tapTimeoutRef = useRef(null);
-  const beatPulse = useRef(new Animated.Value(1)).current;
 
   const { registerTablaEngine } = useVolume();
   const { colors } = useTheme();
   const { updatePlayback } = useTablaPlayback();
+
+  // Load the persisted view preference once.
+  useEffect(() => {
+    AsyncStorage.getItem(VIEW_STORAGE_KEY)
+      .then((v) => {
+        if (v === 'focus' || v === 'full') setViewMode(v);
+      })
+      .catch(() => {});
+  }, []);
+
+  const changeView = (mode) => {
+    setViewMode(mode);
+    AsyncStorage.setItem(VIEW_STORAGE_KEY, mode).catch(() => {});
+  };
 
   // Sync playback state to context so other tabs can show the mini widget
   useEffect(() => {
@@ -94,17 +224,6 @@ export default function TablaScreen() {
         .catch(() => {});
     }, [])
   );
-
-  // Small pulse on each beat
-  useEffect(() => {
-    if (!isPlaying) return;
-    beatPulse.setValue(1.06);
-    Animated.spring(beatPulse, {
-      toValue: 1,
-      friction: 5,
-      useNativeDriver: true,
-    }).start();
-  }, [currentMatra, isPlaying]);
 
   const initEngine = useCallback(async () => {
     if (engineRef.current) return;
@@ -183,11 +302,15 @@ export default function TablaScreen() {
   };
 
   const allTaals = [...BUILT_IN_TAALS, ...customTaals];
-  const labels = vibhagLabels(config.taal);
-  const chunks = vibhagChunks(config.taal);
-  const currentBols = config.taal.theka[currentMatra]?.bols.join(' ') || '-';
 
-  const styles = getStyles(colors);
+  // Derived per-taal layout — recomputed only when the taal changes, not on
+  // every beat (currentMatra changes) or theme render.
+  const styles = useMemo(() => getStyles(colors), [colors]);
+  const labels = useMemo(() => vibhagLabels(config.taal), [config.taal]);
+  const chunks = useMemo(() => vibhagChunks(config.taal), [config.taal]);
+
+  const currentBols = config.taal.theka[currentMatra]?.bols.join(' ') || '-';
+  const marker = vibhagMarkerFor(config.taal, labels, currentMatra);
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
@@ -246,82 +369,109 @@ export default function TablaScreen() {
         </Card>
       )}
 
-      {/* Theka, grouped by vibhag; wraps on narrow screens instead of hiding */}
-      <View style={styles.thekaContainer}>
-        {chunks.map((chunk, v) => {
-          const isKhali = config.taal.khaliVibhag.includes(v);
+      {/* View toggle: Focus (single box) vs Full (whole theka) */}
+      <View style={[styles.viewToggle, { backgroundColor: colors.surface }]}>
+        {[
+          { key: 'focus', label: 'Focus' },
+          { key: 'full', label: 'Full' },
+        ].map((opt) => {
+          const active = viewMode === opt.key;
           return (
-            <View key={v} style={styles.vibhagGroup}>
+            <TouchableOpacity
+              key={opt.key}
+              activeOpacity={0.8}
+              style={[styles.viewToggleOption, active && { backgroundColor: colors.accent }]}
+              onPress={() => changeView(opt.key)}
+            >
               <Text
                 style={[
-                  styles.vibhagMarker,
-                  { color: isKhali ? colors.textTertiary : colors.accent },
+                  styles.viewToggleText,
+                  { color: active ? colors.onAccent : colors.textSecondary },
                 ]}
               >
-                {labels[v]}
+                {opt.label}
               </Text>
-              <View style={styles.vibhagRow}>
-                {chunk.matras.map((matra, j) => {
-                  const i = chunk.start + j;
-                  const isActive = i === currentMatra && isPlaying;
-                  const isSam = i === 0;
-                  return (
-                    <View key={i} style={styles.matraWrapper}>
-                      <View
-                        style={[
-                          styles.matraBox,
-                          { backgroundColor: colors.surface, borderColor: 'transparent' },
-                          isSam && { borderColor: colors.accent },
-                          isActive && { backgroundColor: colors.accent },
-                        ]}
-                      >
-                        <Text
-                          style={[
-                            styles.matraText,
-                            { color: isActive ? colors.onAccent : colors.text },
-                          ]}
-                          numberOfLines={1}
-                        >
-                          {matra.bols.join(' ')}
-                        </Text>
-                      </View>
-                      <Text style={[styles.matraNumber, { color: colors.textTertiary }]}>
-                        {i + 1}
-                      </Text>
-                    </View>
-                  );
-                })}
-              </View>
-            </View>
+            </TouchableOpacity>
           );
         })}
       </View>
 
-      {/* Beat display; tap to set tempo */}
-      <TouchableOpacity activeOpacity={0.85} onPress={handleTapTempo}>
-        <Animated.View
-          style={[
-            styles.infoBox,
-            {
-              backgroundColor: colors.surfaceElevated,
-              borderColor: isTapping ? colors.accent : colors.border,
-              transform: [{ scale: beatPulse }],
-            },
-          ]}
-        >
-          {isTapping && <View style={[styles.recordingDot, { backgroundColor: colors.danger }]} />}
-          <Text style={[styles.infoBol, { color: colors.accent }]} numberOfLines={1}>
-            {currentBols}
-          </Text>
-          <Text style={[styles.infoBeat, { color: colors.text }]}>
-            beat {currentMatra + 1}
-            <Text style={{ color: colors.textTertiary }}> / {config.taal.matras}</Text>
-          </Text>
-          <Text style={[styles.tapHint, { color: colors.textTertiary }]}>
-            {isTapping ? 'keep tapping…' : 'tap in tempo to set BPM'}
-          </Text>
-        </Animated.View>
-      </TouchableOpacity>
+      {viewMode === 'focus' ? (
+        <FocusDisplay
+          bols={currentBols}
+          beatNumber={currentMatra + 1}
+          totalBeats={config.taal.matras}
+          marker={marker}
+          isSam={currentMatra === 0}
+          isPlaying={isPlaying}
+          isTapping={isTapping}
+          onTapTempo={handleTapTempo}
+          colors={colors}
+          styles={styles}
+        />
+      ) : (
+        <>
+          {/* Theka, grouped by vibhag; wraps on narrow screens instead of hiding */}
+          <View style={styles.thekaContainer}>
+            {chunks.map((chunk, v) => {
+              const isKhali = config.taal.khaliVibhag.includes(v);
+              return (
+                <View key={v} style={styles.vibhagGroup}>
+                  <Text
+                    style={[
+                      styles.vibhagMarker,
+                      { color: isKhali ? colors.textTertiary : colors.accent },
+                    ]}
+                  >
+                    {labels[v]}
+                  </Text>
+                  <View style={styles.vibhagRow}>
+                    {chunk.matras.map((matra, j) => {
+                      const i = chunk.start + j;
+                      return (
+                        <MatraBox
+                          key={i}
+                          bols={matra.bols.join(' ')}
+                          number={i + 1}
+                          isActive={i === currentMatra && isPlaying}
+                          isSam={i === 0}
+                          colors={colors}
+                          styles={styles}
+                        />
+                      );
+                    })}
+                  </View>
+                </View>
+              );
+            })}
+          </View>
+
+          {/* Beat display; tap to set tempo */}
+          <TouchableOpacity activeOpacity={0.85} onPress={handleTapTempo}>
+            <Animated.View
+              style={[
+                styles.infoBox,
+                {
+                  backgroundColor: colors.surfaceElevated,
+                  borderColor: isTapping ? colors.accent : colors.border,
+                },
+              ]}
+            >
+              {isTapping && <View style={[styles.recordingDot, { backgroundColor: colors.danger }]} />}
+              <Text style={[styles.infoBol, { color: colors.accent }]} numberOfLines={1}>
+                {currentBols}
+              </Text>
+              <Text style={[styles.infoBeat, { color: colors.text }]}>
+                beat {currentMatra + 1}
+                <Text style={{ color: colors.textTertiary }}> / {config.taal.matras}</Text>
+              </Text>
+              <Text style={[styles.tapHint, { color: colors.textTertiary }]}>
+                {isTapping ? 'keep tapping…' : 'tap in tempo to set BPM'}
+              </Text>
+            </Animated.View>
+          </TouchableOpacity>
+        </>
+      )}
 
       {/* Tempo */}
       <Card label={`Tempo · ${config.bpm} BPM`}>
@@ -422,6 +572,58 @@ const getStyles = (colors) =>
     },
     taalOptionMeta: {
       fontSize: 13,
+    },
+    viewToggle: {
+      flexDirection: 'row',
+      alignSelf: 'center',
+      borderRadius: radius.full,
+      padding: 3,
+      marginBottom: spacing.lg,
+    },
+    viewToggleOption: {
+      paddingVertical: 7,
+      paddingHorizontal: 22,
+      borderRadius: radius.full,
+    },
+    viewToggleText: {
+      fontSize: 13,
+      fontWeight: '700',
+    },
+    focusBox: {
+      borderWidth: 1.5,
+      borderRadius: radius.xl,
+      paddingVertical: 52,
+      paddingHorizontal: spacing.xl,
+      marginBottom: spacing.lg,
+      alignItems: 'center',
+      justifyContent: 'center',
+      minHeight: 208,
+    },
+    focusMarker: {
+      position: 'absolute',
+      top: 14,
+      left: 16,
+      minWidth: 34,
+      height: 34,
+      paddingHorizontal: 8,
+      borderRadius: 17,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    focusMarkerText: {
+      fontSize: 16,
+      fontWeight: '800',
+    },
+    focusBol: {
+      fontSize: 52,
+      fontWeight: '800',
+      letterSpacing: 0.5,
+      textAlign: 'center',
+    },
+    focusBeat: {
+      fontSize: 16,
+      fontWeight: '700',
+      marginTop: 10,
     },
     thekaContainer: {
       flexDirection: 'row',
