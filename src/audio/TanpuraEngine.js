@@ -1,4 +1,5 @@
 import { createAudioPlayer } from 'expo-audio';
+import { localAudioUri } from './assetUri';
 
 const SEMITONE_MAP = {
   Sa: 0,
@@ -42,6 +43,7 @@ function targetSemi(note, scaleOffset = 0) {
 export class TanpuraEngine {
   players = [null, null, null, null];
   playerSemi = [null, null, null, null]; // semi of the sample loaded in each slot
+  uriBySource = new Map(); // require() module -> local file uri (see assetUri)
   isPlaying = false;
   currentStringIndex = 0;
   timerId = null;
@@ -67,6 +69,13 @@ export class TanpuraEngine {
 
   async load() {
     await this.unloadSounds();
+    // Resolve every sample to a local file URI up front — a dev-build require()
+    // asset is an extension-less Metro HTTP URL AVFoundation won't load. See assetUri.
+    for (const s of this.sampleSet) {
+      if (!this.uriBySource.has(s.source)) {
+        this.uriBySource.set(s.source, await localAudioUri(s.source));
+      }
+    }
     for (let i = 0; i < 4; i++) {
       this.setupString(i);
     }
@@ -83,19 +92,21 @@ export class TanpuraEngine {
     while (rate < 0.25) rate *= 2;
 
     if (this.players[i] && this.playerSemi[i] === sample.semi) {
-      // Same recording — just retune
+      // Same recording — just retune. playbackRate is read-only in expo-audio;
+      // set it via setPlaybackRate(). shouldCorrectPitch stays false so the
+      // pitch shifts with the rate (that's how we retune the string).
       this.players[i].shouldCorrectPitch = false;
-      this.players[i].playbackRate = rate;
+      this.players[i].setPlaybackRate(rate);
       return;
     }
 
     if (this.players[i]) {
       this.players[i].release();
     }
-    const player = createAudioPlayer(sample.source);
+    const player = createAudioPlayer({ uri: this.uriBySource.get(sample.source) });
     player.volume = this.volume;
     player.shouldCorrectPitch = false;
-    player.playbackRate = rate;
+    player.setPlaybackRate(rate);
     this.players[i] = player;
     this.playerSemi[i] = sample.semi;
   }
@@ -150,20 +161,24 @@ export class TanpuraEngine {
   playNextString() {
     if (!this.isPlaying) return;
 
-    const player = this.players[this.currentStringIndex];
+    const played = this.currentStringIndex;
+    const player = this.players[played];
     if (player) {
       player.seekTo(0);
       player.play();
     }
 
-    this.onString?.(this.currentStringIndex);
+    this.onString?.(played);
 
-    this.currentStringIndex = (this.currentStringIndex + 1) % 4;
+    this.currentStringIndex = (played + 1) % this.players.length;
 
-    const delayMs = 1200 / this.config.speed;
-    this.timerId = setTimeout(() => {
-      this.playNextString();
-    }, delayMs);
+    // The last two strings are plucked as a quick pair — the two together take
+    // the time of a single pluck — so the interval after each of them is halved.
+    // The first strings keep a full interval, shortening the cycle by one pluck.
+    const base = 1200 / this.config.speed;
+    const isLastPair = played >= this.players.length - 2;
+    const delayMs = isLastPair ? base / 2 : base;
+    this.timerId = setTimeout(() => this.playNextString(), delayMs);
   }
 
   async unloadSounds() {
