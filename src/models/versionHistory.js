@@ -5,6 +5,11 @@
  * new commits are made.
  */
 export const VERSION_HISTORY = [
+  { date: '2026-07-12', message: 'docs: update README and version history for the new engine and views' },
+  { date: '2026-07-12', message: 'feat: drive the tabla with a sample-accurate audio engine' },
+  { date: '2026-07-12', message: 'feat: add switchable Focus and Full views to the tabla screen' },
+  { date: '2026-07-12', message: 'fix: correct tanpura playback rate, pluck timing, and dev-build sample loading' },
+  { date: '2026-07-12', message: 'perf: normalize onsets and bake reverb into tabla and tanpura samples' },
   { date: '2026-07-03', message: 'docs: update README for samples, redesign, and new pages' },
   { date: '2026-07-03', message: 'chore: align dependencies with Expo SDK 55 and dedupe expo-font' },
   { date: '2026-07-03', message: 'chore: remove unused entry files and add file summary comments' },

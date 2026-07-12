@@ -15,10 +15,13 @@ A mobile-first Tanpura and Tabla practice companion built for Gurmat Sangeet (Si
 
 ### Tabla
 - 8 built-in taals: Teentaal, Ektaal, Jhaptaal, Rupak, Dadra, Keherwa, Chautaal, and Addha (Gurmat Sangeet)
-- Theka display with vibhag markers (sam, khali, tali) — auto-hides on narrow screens
+- Two theka display modes (toggle at the top, remembered between launches):
+  - **Focus** (default): one large box showing just the current beat's bol(s), with the vibhag marker (X / 0 / 2 / 3) in the corner
+  - **Full**: the whole theka grouped by vibhag, wrapping onto multiple rows on narrow screens (never hidden)
+- Sample-accurate timing: every bol is scheduled on the audio hardware clock, so the groove stays tight at high tempo and tempo changes quantize cleanly to the next beat
 - Live bol and beat display in a tappable info box
 - Tap tempo for BPM detection
-- BPM slider (1–400) with nudge buttons
+- BPM slider (20–300) with nudge buttons
 - Partaal support: queue a taal change that takes effect on the next sam
 
 ### Taal Editor
@@ -49,7 +52,8 @@ A mobile-first Tanpura and Tabla practice companion built for Gurmat Sangeet (Si
 
 - **React Native** with **Expo SDK 55**
 - **expo-router** for tab-based navigation
-- **expo-audio** for sample playback (`createAudioPlayer`)
+- **react-native-audio-api** (Web Audio API for RN) for sample-accurate tabla scheduling — each hit is a fire-and-forget buffer source placed on the audio hardware clock, so JS-thread jitter can't smear the beat
+- **expo-audio** for tanpura pluck playback (`createAudioPlayer`)
 - **expo-sqlite** for offline storage of custom taals and preferences
 - **react-native-svg** for custom tab icons and harmonium keyboard
 - **AsyncStorage** for theme persistence
@@ -95,10 +99,18 @@ src/
     bolMap.js                # Bol -> stroke sub-hit mapping + fallbacks
     tablaSamples.js          # Tabla stroke sample sources
     tanpuraSamples.js        # Tanpura pluck sample set + root pitch
+    assetUri.js              # Resolve require()'d assets to local file URIs (tanpura)
+    audioControlsStub.js     # No-op stub for the audio library's unused media UI
 
 assets/
   samples/tabla/*.wav        # 11 tabla strokes (CC BY 4.0, see ATTRIBUTIONS.md)
   samples/tanpura/*.mp3      # Matched 4-string tanpura pluck set (CC0)
+
+scripts/
+  normalize_tabla.py         # Align onsets + match levels across tabla samples
+  add_reverb.py              # Bake convolution reverb tails into the samples
+
+metro.config.js              # Redirects the audio library's unused UI component to a stub
 ```
 
 ## Getting Started
@@ -107,11 +119,14 @@ assets/
 # Install dependencies
 npm install
 
-# Start the development server
-npx expo start
-```
+# Build and run the iOS dev client
+# (SDK 55 + the native audio module require a development build — the public
+#  Expo Go app can't load it)
+npx expo run:ios
 
-Then open in Expo Go on your device, or press `w` for web.
+# For subsequent JS-only changes, just start Metro against that dev client:
+npx expo start --dev-client
+```
 
 ## Audio Samples
 
@@ -125,6 +140,12 @@ The app ships with real, openly-licensed recordings (see [ATTRIBUTIONS.md](ATTRI
 - **Tanpura:** a matched CC0 4-string pluck set (Pa G#2, Dha A#2, Sa C#3, Sa C#2)
   by luckylittleraven. The engine picks the nearest recording per string and
   pitch-shifts only the remainder, so the default C# tuning plays unshifted.
+
+All samples are pre-processed offline (see `scripts/`): onsets are aligned to a
+constant ~10 ms offset and levels are matched so the groove stays even, and a
+convolution reverb tail is baked in so resonant tabla strokes and the tanpura
+drone sustain into the gaps at slow tempo (the audio libraries have no runtime
+reverb).
 
 ## License
 
