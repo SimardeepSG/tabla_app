@@ -3,10 +3,11 @@
  * playback state) and defines the bottom tab navigation. Also mounts the
  * mini playback widget overlay and the hidden store-compliance routes.
  */
-import React from 'react';
+import React, { useEffect } from 'react';
 import { View } from 'react-native';
 import { Tabs, usePathname } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
+import { setAudioModeAsync } from 'expo-audio';
 import { VolumeProvider } from '../src/audio/VolumeContext';
 import { TablaPlaybackProvider } from '../src/audio/TablaPlaybackContext';
 import { TanpuraPlaybackProvider } from '../src/audio/TanpuraPlaybackContext';
@@ -27,6 +28,19 @@ function MiniWidgetOverlay() {
 function TabsLayout() {
   const { colors, themeName } = useTheme();
   const isLight = themeName === 'Light';
+
+  // Configure the audio session once. Without this, iOS gives the app the
+  // default (ambient) session, which is silenced by the mute switch and can be
+  // left inactive — the likely cause of "no audio". Use a playback session that
+  // sounds through the mute switch (this is a music app) and needs no mic.
+  useEffect(() => {
+    setAudioModeAsync({
+      playsInSilentMode: true,
+      shouldPlayInBackground: false,
+      allowsRecording: false,
+      interruptionMode: 'mixWithOthers',
+    }).catch(() => {});
+  }, []);
 
   return (
     <View style={{ flex: 1 }}>

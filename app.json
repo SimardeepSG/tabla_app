@@ -13,7 +13,8 @@
       "backgroundColor": "#1a1a2e"
     },
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.simardeepsg.tabla-app"
     },
     "android": {
       "adaptiveIcon": {
@@ -31,7 +32,22 @@
       "expo-sqlite",
       "expo-asset",
       "expo-router",
-      "expo-audio"
+      [
+        "expo-audio",
+        {
+          "microphonePermission": false,
+          "recordAudioAndroid": false,
+          "enableBackgroundPlayback": false
+        }
+      ],
+      [
+        "react-native-audio-api",
+        {
+          "iosBackgroundMode": false,
+          "androidForegroundService": false,
+          "androidPermissions": []
+        }
+      ]
     ]
   }
 }
