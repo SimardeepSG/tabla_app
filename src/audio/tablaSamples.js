@@ -4,6 +4,13 @@
  * Source: "Tabla strokes dataset" by Subodh Deolekar (2020),
  * https://doi.org/10.5281/zenodo.4327350 — CC BY 4.0. Tabla tuned to C#.
  * Takes were selected per class for the cleanest, loudest un-clipped hit.
+ *
+ * Normalized (scripts/normalize_tabla.py) so every strike lands at the same
+ * ~10ms offset from the start — a constant, inaudible delay that keeps the
+ * groove even at high tempo instead of each bol lagging by a different amount.
+ * Levels are matched (-1.5 dBFS peak), natural tails kept, edges faded to
+ * avoid clicks. The engine plays from t=0 on the beat, so equal onset offsets
+ * are what make the rhythm tight.
  */
 export const STROKE_SAMPLES = {
   dha: require('../../assets/samples/tabla/dha.wav'),
